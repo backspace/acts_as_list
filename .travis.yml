@@ -5,6 +5,8 @@ language: ruby
 sudo: false
 before_install:
   - gem update bundler
+env:
+  - TESTOPTS="--seed=23413"
 rvm:
   - 1.9.3
   - 2.0.0
@@ -29,4 +31,3 @@ matrix:
       gemfile: gemfiles/rails_5_0.gemfile
     - rvm: rbx-2
       gemfile: gemfiles/rails_5_0.gemfile
-
