@@ -42,102 +42,102 @@ module ActiveRecord
             configuration[:scope] = :"#{configuration[:scope]}_id"
           end
 
-          if configuration[:scope].is_a?(Symbol)
-            scope_methods = %(
-              def scope_condition
-                { #{configuration[:scope]}: send(:#{configuration[:scope]}) }
+          caller_class = self
+
+          class_eval do
+            define_singleton_method :acts_as_list_top do
+              configuration[:top_of_list].to_i
+            end
+
+            define_method :acts_as_list_top do
+              configuration[:top_of_list].to_i
+            end
+
+            define_method :acts_as_list_class do
+              caller_class
+            end
+
+            define_method :position_column do
+              configuration[:column]
+            end
+
+            define_method :scope_name do
+              configuration[:scope]
+            end
+
+            define_method :add_new_at do
+              configuration[:add_new_at]
+            end
+
+            define_method :"#{configuration[:column]}=" do |position|
+              write_attribute(configuration[:column], position)
+              @position_changed = true
+            end
+
+            if configuration[:scope].is_a?(Symbol)
+              define_method :scope_condition do
+                { configuration[:scope] => send(:"#{configuration[:scope]}") }
               end
 
-              def scope_changed?
+              define_method :scope_changed? do
                 changed.include?(scope_name.to_s)
               end
-            )
-          elsif configuration[:scope].is_a?(Array)
-            scope_methods = %(
-              def scope_condition
-                #{configuration[:scope]}.inject({}) do |hash, column|
+            elsif configuration[:scope].is_a?(Array)
+              define_method :scope_condition do
+                configuration[:scope].inject({}) do |hash, column|
                   hash.merge!({ column.to_sym => read_attribute(column.to_sym) })
                 end
               end
 
-              def scope_changed?
+              define_method :scope_changed? do
                 (scope_condition.keys & changed.map(&:to_sym)).any?
               end
-            )
-          else
-            scope_methods = %(
-              def scope_condition
-                "#{configuration[:scope]}"
+            else
+              define_method :scope_condition do
+                eval "%{#{configuration[:scope]}}"
               end
 
-              def scope_changed?() false end
-            )
-          end
-
-          quoted_position_column = connection.quote_column_name(configuration[:column])
-          quoted_position_column_with_table_name = "#{quoted_table_name}.#{quoted_position_column}"
-
-          class_eval <<-EOV, __FILE__, __LINE__ + 1
-            def self.acts_as_list_top
-              #{configuration[:top_of_list]}.to_i
+              define_method :scope_changed? do
+                false
+              end
             end
-
-            def acts_as_list_top
-              #{configuration[:top_of_list]}.to_i
-            end
-
-            def acts_as_list_class
-              ::#{self.name}
-            end
-
-            def position_column
-              '#{configuration[:column]}'
-            end
-
-            def scope_name
-              '#{configuration[:scope]}'
-            end
-
-            def add_new_at
-              '#{configuration[:add_new_at]}'
-            end
-
-            def #{configuration[:column]}=(position)
-              write_attribute(:#{configuration[:column]}, position)
-              @position_changed = true
-            end
-
-            #{scope_methods}
 
             # only add to attr_accessible
             # if the class has some mass_assignment_protection
-
             if defined?(accessible_attributes) and !accessible_attributes.blank?
-              attr_accessible :#{configuration[:column]}
+              attr_accessible :"#{configuration[:column]}"
             end
 
-            scope :in_list, lambda { where(%q{#{quoted_position_column_with_table_name} IS NOT NULL}) }
-
-            def self.decrement_all
-              update_all_with_touch %q(#{quoted_position_column} = (#{quoted_position_column_with_table_name} - 1))
+            define_singleton_method :quoted_position_column do
+              @_quoted_position_column ||= connection.quote_column_name(configuration[:column])
             end
 
-            def self.increment_all
-              update_all_with_touch %q(#{quoted_position_column} = (#{quoted_position_column_with_table_name} + 1))
+            define_singleton_method :quoted_position_column_with_table_name do
+              @_quoted_position_column_with_table_name ||= "#{caller_class.quoted_table_name}.#{quoted_position_column}"
             end
 
-            def self.update_all_with_touch(updates)
+            scope :in_list, lambda { where("#{quoted_position_column_with_table_name} IS NOT NULL") }
+
+            define_singleton_method :decrement_all do
+              update_all_with_touch "#{quoted_position_column} = (#{quoted_position_column_with_table_name} - 1)"
+            end
+
+            define_singleton_method :increment_all do
+              update_all_with_touch "#{quoted_position_column} = (#{quoted_position_column_with_table_name} + 1)"
+            end
+
+            define_singleton_method :update_all_with_touch do |updates|
               record = new
               attrs = record.send(:timestamp_attributes_for_update_in_model)
               now = record.send(:current_time_from_proper_timezone)
 
-              query = attrs.map { |attr| %(\#{connection.quote_column_name(attr)} = :now) }
+              query = attrs.map { |attr| "#{connection.quote_column_name(attr)} = :now" }
               query.push updates
               query = query.join(", ")
 
               update_all([query, now: now])
             end
-          EOV
+          end
 
           attr_reader :position_changed
 
@@ -324,17 +324,24 @@ module ActiveRecord
             end
           end
 
+          # Poorly named methods. They will insert the item at the desired position if the position
+          # has been set manually using position=, not necessarily the top or bottom of the list:
+
           def add_to_list_top
-            increment_positions_on_all_items
-            self[position_column] = acts_as_list_top
+            if not_in_list? || internal_scope_changed? && !position_changed || default_position?
+              increment_positions_on_all_items
+              self[position_column] = acts_as_list_top
+            else
+              increment_positions_on_lower_items(self[position_column], id)
+            end
+
             # Make sure we know that we've processed this scope change already
             @scope_changed = false
-            #dont halt the callback chain
+
+            # Don't halt the callback chain
             true
           end
 
-          # A poorly named method. It will insert the item at the desired position if the position
-          # has been set manually using position=, not necessarily the bottom of the list
           def add_to_list_bottom
             if not_in_list? || internal_scope_changed? && !position_changed || default_position?
               self[position_column] = bottom_position_in_list.to_i + 1
@@ -345,7 +352,7 @@ module ActiveRecord
             # Make sure we know that we've processed this scope change already
             @scope_changed = false
 
-            #dont halt the callback chain
+            # Don't halt the callback chain
             true
           end
 
